@@ -11,6 +11,8 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 
 from Utils.model_methods import PL_Model
+from Utils.drocc import DROCC_LF
+from Utils.abc import ABC
 
 
 def calculate_random(testing_datasets, pos_class=0, class_label={}):
@@ -40,11 +42,108 @@ def calculate_random(testing_datasets, pos_class=0, class_label={}):
     return auprs
 
 
+def train_nn(classifier, classifier_name, train_loader, val_loader,
+               positive_class=0, epochs=100,
+               optimizer=torch.optim.Adam, optimizer_params={"lr": 1e-3}, lr_scheduler=None, lr_scheduler_params=dict(),
+               loss_fn=torch.nn.functional.binary_cross_entropy, neg_labels=False, patience=7,
+               seed=42, exp_name='kdd', **kwargs):
+    """
+    Train and evaluate model.
+    Args:
+        classifier (torch.nn.Module): classifier model
+        classifier_name (str): name of the classifier
+        train_loader:
+        val_loader:
+        epochs:
+        optimizer:
+        optimizer_params: dict of parameters to pass to the optimizer (e.g. {'lr': 1e-4})
+        loss_fn: loss function
+        neg_labels: False for 0/1 label, True for -1/+1 label
+        quantile: quantile for threshold generation
+        seed: random seed
+    :return:
+
+    """
+
+    # Build Model
+    # backbone, backbone_name, rep_dim = build_backbone(backbone_model, **kwargs)
+
+    # L.seed_everything(seed, workers=True)
+    # if one_class:
+    #     classifier_name = f"C{classifier_layers}"
+    # else:
+    #     classifier_name = f"BC{classifier_layers}"
+    # classifier = build_classifier(classifier_layers=classifier_layers, rep_dim=rep_dim, activation=torch.nn.LeakyReLU(),
+    #                               one_class=one_class,
+    #                               seed=None)
+
+    # Train Model
+    print("Training model...")
+
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = "cpu"
+    model_name = classifier_name
+    # print(model_name)
+    early_stopping = EarlyStopping('val_loss', patience=patience)
+    # need to include version num
+    # exp_num = kwargs.get("exp_num", 1)
+    experiment_path = os.path.join("logs", exp_name, model_name)
+    os.makedirs(experiment_path, exist_ok=True)
+    version_num = len(os.listdir(experiment_path))
+    model_folder = os.path.join(experiment_path, f"version_{version_num}")
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=os.path.join(model_folder, 'checkpoints'))
+    # , monitor="val_loss")
+    drocc_params = kwargs.get("drocc_params", None)
+    callbacks = [checkpoint_callback]
+    if drocc_params is not None:
+        Model = DROCC_LF
+        kwargs = drocc_params
+    else:
+        callbacks.append(early_stopping)
+        abc = True if classifier_name[:2] == "AC" else None
+        # abc = kwargs.get("abc", None)
+        if abc is not None:
+            Model = ABC
+        else:
+            Model = PL_Model
+        kwargs = dict()
+
+    model_pl = Model(
+        backbone=None, classifier=classifier, positive_class=positive_class, optimizer=optimizer,
+        optimizer_params=optimizer_params, lr_scheduler=lr_scheduler, lr_scheduler_params=lr_scheduler_params,
+        loss_fn=loss_fn, neg_labels=neg_labels, seed=seed, device=device, **kwargs)
+
+    trainer = L.Trainer(max_epochs=epochs, deterministic="warn", enable_progress_bar=True,
+                        logger=TensorBoardLogger(save_dir=model_folder, name=f"tensorboard_logging"), log_every_n_steps=10,
+                        callbacks=callbacks)
+    trainer.fit(model_pl, train_loader, val_loader)
+
+    # # Get best model
+    # experiment_path = "logs/" + model_name
+    # directory = os.listdir(experiment_path)
+    # if len(directory) == 0:
+    #     version_num = "version_0"
+    # else:
+    #     version_nums = [int(v.split("_")[-1]) for v in directory]
+    # can also use
+    # max([os.path.join(experiment_path, basename) for basename in os.listdir(experiment_path)], key=os.path.getctime)
+    # version_num = "version_" + str(len(os.listdir(experiment_path)) - 1)
+    # ckpt_path = os.path.join(experiment_path, version_num, "checkpoints")
+    # best_model_ckpt_path = os.path.join(ckpt_path, os.listdir(ckpt_path)[-1])
+    best_model_ckpt_path = checkpoint_callback.best_model_path
+    best_model = Model.load_from_checkpoint(best_model_ckpt_path, backbone=None, classifier=classifier, **kwargs)
+
+    return best_model, best_model_ckpt_path
+
+
 def train_eval(classifier, classifier_name, train_loader, val_loader, test_loader, testing_datasets, class_label,
                positive_class=0, epochs=100,
                optimizer=torch.optim.Adam, optimizer_params={"lr": 1e-3}, lr_scheduler=None, lr_scheduler_params=dict(),
                loss_fn=torch.nn.functional.binary_cross_entropy, neg_labels=False, patience=7, quantile=0.05, tpr=False,
-               normal_is_positive=True, plot=True, seed=42, eval_comments=False, plot_name=None, exp_name='kdd', **kwargs):
+               normal_is_positive=True, plot=True, seed=42, eval_comments=False, plot_name=None, exp_name='kdd',
+               drocc_params=None, **kwargs):
     """
     Train and evaluate model.
     Args:
@@ -74,59 +173,15 @@ def train_eval(classifier, classifier_name, train_loader, val_loader, test_loade
 
     """
 
-    # Build Model
-    # backbone, backbone_name, rep_dim = build_backbone(backbone_model, **kwargs)
-
-    # L.seed_everything(seed, workers=True)
-    # if one_class:
-    #     classifier_name = f"C{classifier_layers}"
-    # else:
-    #     classifier_name = f"BC{classifier_layers}"
-    # classifier = build_classifier(classifier_layers=classifier_layers, rep_dim=rep_dim, activation=torch.nn.LeakyReLU(),
-    #                               one_class=one_class,
-    #                               seed=None)
-
     # Train Model
     print("Training model...")
 
-    use_cuda = torch.cuda.is_available()
-    device = torch.device("cuda" if use_cuda else "cpu")
-    model_name = classifier_name
-    # print(model_name)
-    early_stopping = EarlyStopping('val_loss', patience=patience)
-    # need to include version num
-    # exp_num = kwargs.get("exp_num", 1)
-    experiment_path = "logs/" + exp_name + "/" + model_name
-    os.makedirs(experiment_path, exist_ok=True)
-    version_num = len(os.listdir(experiment_path))
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=f'{experiment_path}/version_{version_num}/checkpoints')
-    # , monitor="val_loss")
-
-    model_pl = PL_Model(
-        backbone=None, classifier=classifier, positive_class=positive_class, optimizer=optimizer,
-        optimizer_params=optimizer_params, lr_scheduler=lr_scheduler, lr_scheduler_params=lr_scheduler_params,
-        loss_fn=loss_fn, neg_labels=neg_labels, seed=seed, device=device)
-
-    trainer = L.Trainer(max_epochs=epochs, deterministic="warn", enable_progress_bar=True,
-                        logger=TensorBoardLogger(save_dir="logs/", name=model_name), log_every_n_steps=10,
-                        callbacks=[early_stopping, checkpoint_callback])
-    trainer.fit(model_pl, train_loader, val_loader)
-
-    # # Get best model
-    # experiment_path = "logs/" + model_name
-    # directory = os.listdir(experiment_path)
-    # if len(directory) == 0:
-    #     version_num = "version_0"
-    # else:
-    #     version_nums = [int(v.split("_")[-1]) for v in directory]
-    # can also use
-    # max([os.path.join(experiment_path, basename) for basename in os.listdir(experiment_path)], key=os.path.getctime)
-    # version_num = "version_" + str(len(os.listdir(experiment_path)) - 1)
-    # ckpt_path = os.path.join(experiment_path, version_num, "checkpoints")
-    # best_model_ckpt_path = os.path.join(ckpt_path, os.listdir(ckpt_path)[-1])
-    best_model_ckpt_path = checkpoint_callback.best_model_path
-    best_model = PL_Model.load_from_checkpoint(best_model_ckpt_path, backbone=None, classifier=classifier)
+    best_model, best_model_ckpt_path = train_nn(
+        classifier, classifier_name, train_loader, val_loader,
+               positive_class, epochs,
+               optimizer, optimizer_params, lr_scheduler, lr_scheduler_params,
+               loss_fn, neg_labels, patience,
+               seed, exp_name, drocc_params=drocc_params)
     # Evaluate on Dataset
     print("Evaluating model...")
     precision, recall, f1, average_precision, auroc, acc, df_results, threshold = eval_model(
@@ -144,26 +199,28 @@ def train_eval(classifier, classifier_name, train_loader, val_loader, test_loade
 
 def eval_run(classifier, model_name, val_loader, test_loader, testing_datasets, class_label,
              quantile=0.05, tpr=False, pos_label=0, normal_is_positive=False, plot=True,
-             eval_comments=False, version_num=None, exp_name='kdd', **kwargs):
+             eval_comments=False, version_num=None, exp_name='kdd', drocc_params=None, **kwargs):
 
     # robustness = "_NRF" if nrf_train else ""
 
     # Get best model
-    experiment_path = "logs/" + exp_name + "/" + model_name + "/"
-    # can also use
-    # max([os.path.join(experiment_path, basename) for basename in os.listdir(experiment_path)], key=os.path.getctime)
-    if version_num is None:
-        version_num = len(os.listdir(experiment_path)) - 1
-    elif version_num < 0:
-        version_num = len(os.listdir(experiment_path)) + version_num
-
-    ckpt_path = os.path.join(experiment_path, "version_" + str(version_num), "checkpoints")
-    best_model_ckpt_path = os.path.join(ckpt_path, os.listdir(ckpt_path)[-1])
+    best_model_ckpt_path = get_model_path(model_name, version_num, exp_name)
     print("Loading model from:", best_model_ckpt_path)
 
+    if drocc_params is not None:
+        Model = DROCC_LF
+        model_params = drocc_params
+    else:
+        # abc = kwargs.get("abc", None)
+        abc = True if model_name[:2] == "AC" else None
+        if abc is not None:
+            Model = ABC
+        else:
+            Model = PL_Model
+        model_params = dict()
     # best_model_ckpt_path = checkpoint_callback.best_model_path
-    best_model = PL_Model.load_from_checkpoint(
-        best_model_ckpt_path, backbone=None, classifier=classifier)
+    best_model = Model.load_from_checkpoint(
+        best_model_ckpt_path, backbone=None, classifier=classifier, **model_params)
 
     # Evaluate on Dataset
     print("Evaluating model...")
@@ -178,6 +235,20 @@ def eval_run(classifier, model_name, val_loader, test_loader, testing_datasets, 
         **kwargs)
 
     return best_model, best_model_ckpt_path, precision, recall, f1, average_precision, auroc, acc, df_results, threshold
+
+
+def get_model_path(model_name, version_num=None, exp_name='kdd'):
+    # Get model
+    experiment_path = os.path.join("logs", exp_name, model_name)
+    # can also use
+    # max([os.path.join(experiment_path, basename) for basename in os.listdir(experiment_path)], key=os.path.getctime)
+    if version_num is None:
+        version_num = len(os.listdir(experiment_path)) - 1
+    elif version_num < 0:
+        version_num = len(os.listdir(experiment_path)) + version_num
+
+    ckpt_path = os.path.join(experiment_path, "version_" + str(version_num), "checkpoints")
+    return os.path.join(ckpt_path, os.listdir(ckpt_path)[-1])
 
 
 def eval_model(model, val_loader, test_loader, testing_datasets, class_label, eval_comments=False,
@@ -247,7 +318,8 @@ def predict_from_loader(model, loader, torch_model, pos_label, label_is_map=Fals
         loader: torch dataloader or (x, y) tuple of arrays
         torch_model:
         pos_label:
-        label_is_map: bool if y label is anom label (0 for normal, 1/2/3/... for anom types)
+        label_is_map: bool if y ground truth label is anom label (0 for normal, 1/2/3/... for anom types)
+                        AND should be converted to 1 (base class) and 0 (others/anoms)
 
     Returns:
 
@@ -267,7 +339,13 @@ def predict_from_loader(model, loader, torch_model, pos_label, label_is_map=Fals
         y_true = np.array(y_true)
     else:
         x, y_true = loader
-        y_score = model.decision_function(x)
+        try:
+            y_score = model.decision_function(x)
+        except:
+            y_score = model.predict_proba(x)
+        if len(y_score.shape) > 1:
+            # pred is probabilities of all (2) classes. Pick the normal class (label 1)
+            y_score = y_score[:, -1]
     if label_is_map:
         # convert base class (class 0) to 1 and others/anomalies (class 1/2/3/...) to 0
         y_true = (y_true == 0)
@@ -361,8 +439,167 @@ def calculate_overall_metrics(model, loader, threshold=0.5, pos_label=1, normal_
     return precision, recall, f1, average_precision, auroc, acc
 
 
+def pred_per_class(model, testing_datasets, class_label, pos_label=1,
+                      label_is_map=False, torch_model=True):
+
+    if torch_model:
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        test_loader = torch.utils.data.DataLoader(testing_datasets[0], batch_size=1024, shuffle=False)
+    else:
+        test_loader = testing_datasets[0]
+
+    # pred base (normal) class
+    y_pred, y_true = predict_from_loader(
+        model, test_loader, torch_model=torch_model, pos_label=pos_label, label_is_map=label_is_map)
+
+    # fake = "" if not flip_labels else " (NRF)"
+    classes = {class_id: name for name, class_id in class_label.items()}
+
+    # df = pd.DataFrame(columns=["Class", "precision", "recall", "f1", "average_precision", "auroc", "acc"])
+    # df_data = dict()
+
+    # precisions = []
+    # recalls = []
+    # f1s = []
+    # auprs = []
+    for i in range(1, len(classes.keys())):
+        if torch_model:
+            test_loader = torch.utils.data.DataLoader(testing_datasets[i], batch_size=1024, shuffle=False)
+        else:
+            test_loader = testing_datasets[i]
+
+        neg_pred, neg_true = predict_from_loader(
+            model, test_loader, torch_model=torch_model, pos_label=pos_label, label_is_map=label_is_map)
+
+        y_true = np.hstack((y_true.squeeze(), neg_true.squeeze()))
+        y_pred = np.hstack((y_pred.squeeze(), neg_pred.squeeze()))
+    return y_pred, y_true
+
+
+def eval_preds_per_class(y_pred, y_true_id, class_label, threshold=0.5, normal_is_positive=True,
+                         eval_comments=False, plot=False, plot_name=None):
+
+    pos_pred = y_pred[y_true_id == 0]
+    pos_true = y_true_id[y_true_id == 0]
+
+    # pos_pred, pos_true = predict_from_loader(
+    #     model, test_loader, torch_model=torch_model, pos_label=pos_label, label_is_map=label_is_map)
+
+    # fake = "" if not flip_labels else " (NRF)"
+    classes = {class_id: name for name, class_id in class_label.items()}
+
+    df = pd.DataFrame(columns=["Class", "precision", "recall", "f1", "average_precision", "auroc", "acc"])
+    # df_data = dict()
+
+    # precisions = []
+    # recalls = []
+    # f1s = []
+    # auprs = []
+    # for i in range(1, len(classes.keys())):
+    for i, k in enumerate(classes.keys()):
+        if i == 0:
+            continue
+        # if torch_model:
+        #     test_loader = torch.utils.data.DataLoader(testing_datasets[i], batch_size=1024, shuffle=False)
+        # else:
+        #     test_loader = testing_datasets[i]
+
+        neg_pred = y_pred[y_true_id == k]
+        neg_true = y_true_id[y_true_id == k]
+        # neg_pred, neg_true = predict_from_loader(
+        #     model, test_loader, torch_model=torch_model, pos_label=pos_label, label_is_map=label_is_map)
+
+        binary_true = np.hstack((pos_true, neg_true))
+        binary_scores = np.hstack((pos_pred, neg_pred))
+
+        if normal_is_positive:
+            # convert binary labels from 0/normal and 1,2,3/anom to 1/normal and 0/anom
+            binary_true = (binary_true == 0).astype(int)
+        else:
+            # convert binary labels from 0/normal and 1,2,3/anom to 0/normal and 1/anom
+            binary_true = (binary_true != 0).astype(int)
+
+        # above threshold -> 1 (positive class)
+        precision, recall, f1, _ = precision_recall_fscore_support(binary_true, binary_scores >= threshold,
+                                                                   average='binary', pos_label=1)
+        acc = accuracy_score(binary_true, binary_scores >= threshold)
+        # precisions.append(precision)
+        # recalls.append(recall)
+        # f1s.append(f1)
+        # auprs.append(average_precision)
+
+        if plot:
+            if normal_is_positive:
+                classes_plot = [classes[0], classes[k]]
+            else:
+                classes_plot = [classes[k], classes[0]]
+            average_precision, roc_auc = plot_metrics(
+                binary_true, binary_scores, classes=classes_plot, threshold=threshold,
+                recall=recall, eval_comments=eval_comments, plot_name=plot_name)
+        else:
+            average_precision = average_precision_score(binary_true, binary_scores, pos_label=1)
+            fprs, tprs, thresholds = roc_curve(binary_true, binary_scores)
+            roc_auc = auc(fprs, tprs)
+
+        print(classes[k], precision, recall, f1, average_precision, roc_auc, acc)
+        df.loc[i - 1] = [classes[k], precision, recall, f1, average_precision, roc_auc, acc]
+    return df
+
+
+def metrics_per_class_with_pred(y_pred, y_true_id, class_label, threshold=0.5, normal_is_positive=True,
+                      eval_comments=False, plot=False, plot_name=None):
+    pos_pred = y_pred[y_true_id == 0]
+    pos_true = y_true_id[y_true_id == 0]
+
+    classes = {class_id: name for name, class_id in class_label.items()}
+    df = pd.DataFrame(columns=["Class", "precision", "recall", "f1", "average_precision", "auroc", "acc"])
+
+    # for i in range(1, len(classes.keys())):
+    for i, k in enumerate(classes.keys()):
+        if i == 0:
+            continue
+
+        neg_pred = y_pred[y_true_id == k]
+        neg_true = np.ones((y_true_id == k).sum())
+
+        binary_true = np.hstack((pos_true, neg_true))
+        binary_scores = np.hstack((pos_pred, neg_pred))
+
+        precision, recall, f1, _ = precision_recall_fscore_support(binary_true, binary_scores >= threshold,
+                                                                   average='binary', pos_label=1)
+        acc = accuracy_score(binary_true, binary_scores >= threshold)
+
+        if plot:
+            if len(neg_true) == 0:
+                print("No Anomalies")
+                continue
+            if normal_is_positive:
+                classes_plot = [classes[0], classes[k]]
+            else:
+                classes_plot = [classes[k], classes[0]]
+            average_precision, roc_auc = plot_metrics(
+                binary_true, binary_scores, classes=classes_plot, threshold=threshold,
+                recall=recall, eval_comments=eval_comments, plot_name=plot_name)
+        else:
+            average_precision = average_precision_score(binary_true, binary_scores, pos_label=1)
+            fprs, tprs, thresholds = roc_curve(binary_true, binary_scores)
+            roc_auc = auc(fprs, tprs)
+
+        print(classes[k], precision, recall, f1, average_precision, roc_auc, acc)
+        df.loc[i - 1] = [classes[k], precision, recall, f1, average_precision, roc_auc, acc]
+
+    return df
+
+
 def metrics_per_class(model, testing_datasets, class_label, threshold=0.5, pos_label=1, normal_is_positive=True,
                       label_is_map=False, eval_comments=False, plot=False, torch_model=True, plot_name=None):
+
+    if model is None:
+        y_pred, y_true = testing_datasets
+        return metrics_per_class_with_pred(y_pred, y_true, class_label, threshold=threshold,
+                                           normal_is_positive=normal_is_positive,
+                                           eval_comments=eval_comments, plot=plot,
+                                           plot_name=plot_name)
 
     if torch_model:
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -377,7 +614,10 @@ def metrics_per_class(model, testing_datasets, class_label, threshold=0.5, pos_l
     classes = {class_id: name for name, class_id in class_label.items()}
 
     df = pd.DataFrame(columns=["Class", "precision", "recall", "f1", "average_precision", "auroc", "acc"])
-    for i in range(1, len(classes.keys())):
+
+    for i, k in enumerate(classes.keys()):
+        if i == 0:
+            continue
         if torch_model:
             test_loader = torch.utils.data.DataLoader(testing_datasets[i], batch_size=1024, shuffle=False)
         else:
@@ -394,10 +634,13 @@ def metrics_per_class(model, testing_datasets, class_label, threshold=0.5, pos_l
         acc = accuracy_score(binary_true, binary_scores >= threshold)
 
         if plot:
+            if len(neg_true) == 0:
+                print("No Anomalies")
+                continue
             if normal_is_positive:
-                classes_plot = [classes[0], classes[i]]
+                classes_plot = [classes[0], classes[k]]
             else:
-                classes_plot = [classes[i], classes[0]]
+                classes_plot = [classes[k], classes[0]]
             average_precision, roc_auc = plot_metrics(
                 binary_true, binary_scores, classes=classes_plot, threshold=threshold,
                 recall=recall, eval_comments=eval_comments, plot_name=plot_name)
@@ -406,13 +649,28 @@ def metrics_per_class(model, testing_datasets, class_label, threshold=0.5, pos_l
             fprs, tprs, thresholds = roc_curve(binary_true, binary_scores)
             roc_auc = auc(fprs, tprs)
 
-        print(classes[i], precision, recall, f1, average_precision, roc_auc, acc)
-        df.loc[i - 1] = [classes[i], precision, recall, f1, average_precision, roc_auc, acc]
+        print(classes[k], precision, recall, f1, average_precision, roc_auc, acc)
+        df.loc[i - 1] = [classes[k], precision, recall, f1, average_precision, roc_auc, acc]
     return df
 
 
 def plot_metrics(y_true, y_scores, classes, threshold=None, recall=None, eval_comments=False, fpr=None,
                  plot_name="OCC"):
+    """
+
+    Args:
+        y_true: 0 is negative pred, 1 is positive pred
+        y_scores:
+        classes:
+        threshold:
+        recall:
+        eval_comments:
+        fpr:
+        plot_name:
+
+    Returns:
+
+    """
     if plot_name is None:
         plot_name = "OCC"
     class0 = classes[0]
@@ -430,8 +688,9 @@ def plot_metrics(y_true, y_scores, classes, threshold=None, recall=None, eval_co
     neg_pred = y_scores[y_true == 0]
 
     plt.title(f"Prediction Histogram for {class0} vs {class1}{append} ({plot_name})")
-    plt.hist(pos_pred, label=class0, color='red', alpha=0.7)
-    plt.axvline(np.min(pos_pred), linestyle='--', color='red', alpha=0.4, label='Min Positive')
+    if len(pos_pred) > 0:
+        plt.hist(pos_pred, label=class0, color='red', alpha=0.7)
+        plt.axvline(np.min(pos_pred), linestyle='--', color='red', alpha=0.4, label='Min Positive')
     plt.hist(neg_pred, label=class1, color='blue', alpha=0.7)
     plt.axvline(np.max(neg_pred), linestyle='--', color='blue', alpha=0.4, label='Max Negative')
     if threshold is not None:
@@ -444,8 +703,9 @@ def plot_metrics(y_true, y_scores, classes, threshold=None, recall=None, eval_co
     pr_auc = auc(lr_recall, lr_precision)
 
     # plot the precision-recall curves
-    no_skill = len(pos_pred) / len(y_true)
-    plt.plot([0, 1], [no_skill, no_skill], linestyle='--', label='Random')
+    if len(pos_pred) > 0:
+        no_skill = len(pos_pred) / len(y_true)
+        plt.plot([0, 1], [no_skill, no_skill], linestyle='--', label='Random')
     plt.plot(lr_recall, lr_precision, marker='.', label=f'{plot_name} (area = %0.3f)' % pr_auc)
     if recall is not None:
         plt.axvline(x=recall, color='orange', linestyle='--', alpha=0.8, label="Detection")

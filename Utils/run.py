@@ -1,16 +1,20 @@
 from Utils.pipeline import *
 
 dataset_name = "kdd"
+val_split = 0.2
 if dataset_name == "kitsune":
     kwargs_data = {"mirai": False, "custom": "fuzzing"}
     n_dim = 115
 elif dataset_name == "kdd":
     kwargs_data = {}
     n_dim = 119
+elif dataset_name == "thyroid":
+    kwargs_data = {}
+    n_dim = 21
+    val_split = 0.15
 else:
     raise ValueError("Dataset name must be either 'kitsune' or 'kdd'")
 
-val_split = 0.2
 
 # only select normal class for training
 training_classes = [0]
@@ -21,8 +25,9 @@ train_label_col = 'normal_flag'
 test_index_match_col = 'attack_map'
 test_label_col = 'attack_map'
 
-model_type = "NN"  # NN, SVM, IsolationForest, DeepSVDD
+model_type = "SVM"  # NN, SVM, IsolationForest, DeepSVDD
 one_class = True
+quadratic_bump = True
 sigmoid_head = True
 classifier_layers = 2 + 1
 n_neurons = 500
@@ -67,6 +72,7 @@ args = {
     "rep_dim": rep_dim,
     "one_class": one_class,
     "sigmoid_head": sigmoid_head,
+    "quadratic_bump": quadratic_bump,
     "activation": activation,
     "dropout": dropout,
     "epochs": epochs,

@@ -1,3 +1,6 @@
+import glob
+from collections import OrderedDict
+
 import pandas as pd
 import numpy as np
 import torch
@@ -7,7 +10,7 @@ from torch.utils.data import TensorDataset
 import os
 
 
-def get_df(path, columns, drop, read="csv", header=None):
+def get_df(path, columns, drop, read="csv", header=None, **kwargs):
     """
     Function to get a dataframe from a csv file.
     Args:
@@ -15,6 +18,8 @@ def get_df(path, columns, drop, read="csv", header=None):
         columns: column names of the csv file, or None if alr provided
         drop: False or list of columns to drop
         read: filetype (csv, parquet, etc)
+        header: True or None
+        **kwargs: passed to pd.read_csv or reader
 
     Returns:
 
@@ -24,9 +29,9 @@ def get_df(path, columns, drop, read="csv", header=None):
     else:
         reader = pd.read_parquet
     if type(path) is str:
-        df = reader(path, header=header)
+        df = reader(path, header=header, **kwargs)
     else:
-        dfs = [reader(pth, header=header) for pth in path]
+        dfs = [reader(pth, header=header, **kwargs) for pth in path]
         # concat vertically i.e. along columns
         df = pd.concat(dfs, axis=1)
     if columns is not None:
@@ -186,7 +191,8 @@ def preprocess(df, test_df, features_to_encode, numeric_features, training_class
 
     x_training, y_training = get_x_y(
         df, data_train, classes=training_classes, index_match_col=train_index_match_col, label_col=train_label_col)
-    X = scaler.fit_transform(x_training)
+    # vstack in case x_training is a column/array of arrays, rather than a table/2D-array
+    X = scaler.fit_transform(np.vstack(x_training.squeeze()))
 
     np.random.seed(0)
     np.random.shuffle(X)
@@ -196,7 +202,7 @@ def preprocess(df, test_df, features_to_encode, numeric_features, training_class
     # for testing, get labels which are int: tell us what type of attack
     x_testing, y_test = get_x_y(test_df, data_test, classes=test_classes,
                                 index_match_col=test_index_match_col, label_col=test_label_col)
-    x_test = scaler.transform(x_testing)
+    x_test = scaler.transform(np.vstack(x_testing.squeeze()))
 
     # # validation split
     # if val_split > 0:
@@ -398,11 +404,22 @@ def get_normal_label(pos_label=1, normal_is_positive=False):
     return pos_label if normal_is_positive else (1 - pos_label)
 
 
-def get_in_range_date(x, y, lower=0, upper=1, print_drop_count=False):
-    valid_indices = np.logical_or(lower <= x, x <= upper).any(axis=1)
+def get_in_range_data(x, y, lower=0, upper=1, print_drop_count=False, classes="all"):
+    if classes == "all":
+        indices = np.arange(len(x))
+        x_ = x
+        # y_ = y
+    else:
+        if type(classes) is not list:
+            classes = list(classes)
+        indices = np.isin(y, classes)
+        x_ = x[indices]
+        # y_ = y[indices]
+    valid_indices = np.logical_or(lower <= x_, x_ <= upper).all(axis=1)
+    valid_indices_original = indices[valid_indices]
     if print_drop_count:
-        print(f"Dropped {len(x) - len(valid_indices)} rows")
-    return x[valid_indices], y[valid_indices]
+        print(f"Dropped {len(x) - len(valid_indices_original)} rows")
+    return x[valid_indices_original], y[valid_indices_original]
 
 
 def get_data(dataset_name, **kwargs):
@@ -417,7 +434,7 @@ def get_data(dataset_name, **kwargs):
         df = get_df(path_train, columns=columns, drop=False)
         test_df = get_df(path_test, columns=columns, drop=False)
 
-        new_attacks = [1, 2, 3, 4]
+        anoms = [1, 2, 3, 4]
         test_classes = [0, 1, 2, 3, 4]
 
         # get numeric features, we won't worry about encoding these at this point
@@ -452,7 +469,7 @@ def get_data(dataset_name, **kwargs):
             normal_label = 0
             attack_labels = ['Normal', "Mirai"]
 
-            new_attacks = [1]
+            anoms = [1]
             test_classes = [0, 1]
 
             def map_attack(i):
@@ -483,7 +500,7 @@ def get_data(dataset_name, **kwargs):
                 normal_label = 0
                 attack_labels = ['Normal', custom]
 
-                new_attacks = [1]
+                anoms = [1]
                 test_classes = [0, 1]
 
                 def map_attack(i):
@@ -503,7 +520,7 @@ def get_data(dataset_name, **kwargs):
                 #                  'ssl_renegotiation', 'syn_dos', 'video_injection']
                 raw_label_col = 115
 
-                new_attacks = [1, 2, 3, 4, 5, 6, 7, 8]
+                anoms = [1, 2, 3, 4, 5, 6, 7, 8]
                 test_classes = [0, 1, 2, 3, 4, 5, 6, 7, 8]
 
                 def map_attack(i):
@@ -519,14 +536,235 @@ def get_data(dataset_name, **kwargs):
 
         # attack_labels = ['Normal', att.replace("_", " ").title()]
 
-        # new_attacks = [1]
+        # anoms = [1]
         # test_classes = [0]
 
+    elif dataset_name == "thyroid":
+        data_dir = '../data/thyroid+disease'
+        train_file = 'ann-train.data'
+        test_file = 'ann-test.data'
+        df = get_df(f"{data_dir}/{train_file}", columns=None, drop=False, header=None, delimiter=' ').dropna(axis=1)
+        test_df = get_df(f"{data_dir}/{test_file}", columns=None, drop=False, header=None, delimiter=' ').dropna(axis=1)
+        # df = pd.read_csv(f"{data_dir}/{train_file}", header=None, delimiter=' ').dropna(axis=1)
+
+        normal_label = 3
+        raw_label_col = 21
+        features_to_encode = []
+        n_dim = 21
+        numeric_features = list(range(n_dim))
+        attack_labels = ['Normal', 'Hyperfunction', 'Subnormal']
+
+        anoms = [1, 2]
+        test_classes = [0, 1, 2]
+        def map_attack(i):
+            if i == 3:
+                # normal maps to 0
+                return 0
+            # 1: 'Hyperfunction', 2: 'Subnormal'
+            return i
+    elif dataset_name == "arrhythmia":
+        from sklearn.model_selection import train_test_split
+        training_classes = kwargs.get("training_classes", [1, 9, 10])
+
+        data_dir = '../data/arrhythmia'
+        file = 'arrhythmia.data'
+
+        normal_label = 1
+        raw_label_col = 279
+        features_to_encode = []
+        n_dim = 279
+        numeric_features = list(range(n_dim))
+        anom_label = ['CAD',
+                      'Old AMI',
+                      'Old IMI',
+                      'ST',
+                      'SB',
+                      'PVC',
+                      'PSC',
+                      'Left BBB',
+                      'Right BBB',
+                      #               degree AtrioVentricular block,
+                      #               degree AV block,
+                      #               degree AV block,
+                      'Left VH',
+                      'AF',
+                      'Others']
+
+        attack_labels = ['Normal'] + anom_label
+
+        anoms_raw = list(range(2, 11)) + list(range(14, 17))
+        test_classes_raw = [normal_label] + anoms_raw
+
+        anoms = list(range(1, len(test_classes_raw)))
+        test_classes = list(range(len(test_classes_raw)))
+        def map_attack(i):
+            # if i == normal_label:
+            #     # normal maps to 0
+            #     return 0
+            #
+            return test_classes_raw.index(i)
+
+        # make sure that the normal data in training
+        assert 0 == training_classes[0]
+        seen_anom_label = []
+        for cls in training_classes[1:]:
+            seen_anom_label.append(test_classes_raw[cls])
+            # don't use training classes in testing, due to limited training samples
+            test_classes.remove(cls)
+            known_anom_name = anom_label[cls-1]
+            attack_labels.remove(known_anom_name)
+        # training_classes = [anoms.index(cls) for cls in training_classes]
+
+        df_raw = get_df(f"{data_dir}/{file}", columns=None, drop=False, header=None).dropna(axis=1)
+
+        labels = df_raw.iloc[:, -1]
+        indices_normal_bool = (labels == normal_label)
+        indices_known_anoms_bool = labels.isin(seen_anom_label)
+        indices_known_anoms = np.flatnonzero(indices_known_anoms_bool)
+
+        # use most of normal data for training. use all of known anomalies for training (because there are so few)
+        x_normal_train_indices, x_normal_test_indices = train_test_split(
+            np.flatnonzero(indices_normal_bool), test_size=0.2, random_state=42
+        )
+
+        training_indices = np.hstack((x_normal_train_indices, indices_known_anoms))
+        df_train_raw = df_raw.iloc[training_indices]
+        x_normal_train_indices_bool = np.zeros(len(df_raw))
+        x_normal_train_indices_bool[x_normal_train_indices] = True
+        test_indices_bool = ~(np.logical_or(x_normal_train_indices_bool, indices_known_anoms_bool))
+        df_test_raw = df_raw[test_indices_bool]
+
+        # mean-filling to impute missing data
+        #   note that we impute based on training data, and then use the values for test data
+        m = df_train_raw.eq("?")
+        means = df_train_raw[~m].apply(pd.to_numeric).mean(axis=0)
+        df = df_train_raw.mask(m, means, axis=1).apply(pd.to_numeric)
+        m = df_test_raw.eq("?")
+        test_df = df_test_raw.mask(m, means, axis=1).apply(pd.to_numeric)
+
+
+    elif dataset_name == "nlp":
+        data_dir = "../data/embedding"
+        raw_label_col = "Label"
+        data_col = "Embedding"
+        numeric_features = [data_col]
+        # possible datasets:
+        possible_datasets = OrderedDict({
+          "misinfo": ["LUN", "satnews"],
+          "disinfo": ["amazon_lb", "CGFake"],
+          "toxic": ["HSOL", "jigsaw"],
+          "spam": ["assassin", "enron"],
+          "sensitive": ["EDENCE", "FAS"]
+        })
+        dataset_harm_label = dict()
+        attack_labels = ['Normal']
+        anoms = []
+        test_classes = [0]
+        j = 0
+        for i, (harm_type, datasets) in enumerate(possible_datasets.items()):
+            for dataset in datasets:
+                dataset_harm_label[dataset] = j + 1
+                attack_labels.append(dataset)
+                anoms.append(j + 1)
+                test_classes.append(j + 1)
+                j += 1
+        print("Anomaly ID:", dataset_harm_label)
+        train_datasets_list = kwargs.get("dataset_train", list(dataset_harm_label.keys()))
+        test_datasets_list = kwargs.get("dataset_test", list(dataset_harm_label.keys()))
+        # TODO: Grab the datasets
+
+        def convert_embeddings_str_to_array(embeddings):
+            return np.fromstring(embeddings.strip("[]"), sep=",")
+
+        print("Grabbing Training Data")
+        df = read_join_datasets(data_dir, train_datasets_list, dataset_harm_label,
+                                convert_embeddings_str_to_array=convert_embeddings_str_to_array,
+                                data_col=data_col, data_label=raw_label_col, drop=['Sentence'], suffix="_train.csv",
+                                verbose=True)
+        # for train_dataset in train_datasets_list:
+        #     print(train_dataset)
+        #     df_train = get_df(
+        #         os.path.join(data_dir, f"{train_dataset}_train.csv"), columns=None, header=True, drop=['Sentence']
+        #     )
+        #     embeddings = df_train["Embedding"].apply(convert_embeddings_str_to_array)
+        #     #  multiply label based on dataset_harm_label ID
+        #     labels = df_train["Label"] * dataset_harm_label[train_dataset]
+        print("Grabbing Testing Data")
+        test_df = read_join_datasets(data_dir, test_datasets_list, dataset_harm_label,
+                                convert_embeddings_str_to_array=convert_embeddings_str_to_array,
+                                data_col=data_col, data_label=raw_label_col, drop=['Sentence'], suffix="_test.csv",
+                                verbose=True)
+
+        normal_label = 0
+        features_to_encode = []
+        # n_dim = 384
+
+        def map_attack(anom):
+            return anom
+
+    elif dataset_name == "mvtec":
+        from Utils.mvtec import get_dataset
+        # Get embedding type
+        model_type = kwargs.get("model_type", "dinov2")
+        agg_method = kwargs.get("agg_method", "cls")
+        # Get object (e.g., bottle, capsule)
+        obj = kwargs.get("obj", "bottle")
+
+        data_dir = f"../data//mvtec_anomaly_detection/{obj}/embeddings"
+
+        X, y, x_test, y_test_id, test_class_labels, test_classes = get_dataset(data_dir, model_type, agg_method, known_anom=[1])
+        attack_labels = test_class_labels
+        anoms = test_classes[1:]
+        # test_classes = list(range(len(test_class_labels)))
+        # anoms = list(range(1, len(test_class_labels)))
+        numeric_features = list(range(X.shape[1]))
+
+        raw_label_col = "Label"
+        df = pd.DataFrame(data=np.hstack((X, y.reshape(-1, 1))), columns=numeric_features+[raw_label_col])
+        test_df = pd.DataFrame(data=np.hstack((x_test, y_test_id.reshape(-1, 1))), columns=numeric_features+[raw_label_col])
+
+        normal_label = 0
+        features_to_encode = []
+
+        def map_attack(anom):
+            return anom
     else:
         raise ValueError("Dataset not supported")
+    
+    features_to_encode = kwargs.get('features_to_encode', features_to_encode)
+    numeric_features = kwargs.get('numeric_features', numeric_features)
+    normal_label = kwargs.get('normal_label', normal_label)
+    attack_labels = kwargs.get('attack_labels', attack_labels)
+    anoms = kwargs.get('anoms', anoms)
+    test_classes = kwargs.get('test_classes', test_classes)
+    raw_label_col = kwargs.get('raw_label_col', raw_label_col)
+    map_attack = kwargs.get('map_attack', map_attack)
 
-    return (df, test_df, features_to_encode, numeric_features, normal_label, attack_labels, new_attacks, test_classes,
+    return (df, test_df, features_to_encode, numeric_features, normal_label, attack_labels, anoms, test_classes,
             raw_label_col, map_attack)
+
+
+def read_join_datasets(data_dir, dataset_list, dataset_anom_label, convert_embeddings_str_to_array=None,
+                       data_col="Embedding", data_label="Label", drop=['Sentence'], suffix="_train.csv", verbose=True):
+    df_list = []
+    # mother_df = pd.DataFrame(0, columns=[data_col, data_label])
+    for dataset in dataset_list:
+        if verbose:
+            print(dataset)
+        df = get_df(
+            os.path.join(data_dir, f"{dataset}{suffix}"), columns=None, header=0, drop=drop
+        )
+        embeddings = df[data_col]
+        if convert_embeddings_str_to_array is not None:
+            embeddings = embeddings.apply(convert_embeddings_str_to_array)
+        #  multiply label based on dataset_harm_label ID
+        labels = df[data_label] * dataset_anom_label[dataset]
+
+        df_list.append(pd.concat([embeddings, labels], axis=1))
+        # mother_df = pd.concat([mother_df, pd.concat([embeddings, labels], axis=1)])
+    mother_df = pd.concat(df_list)
+
+    return mother_df
 
 
 def np_to_dataloader(x_training_list, y_training_list, x_test, y_test, batch_size):
@@ -542,8 +780,11 @@ def np_to_dataloader(x_training_list, y_training_list, x_test, y_test, batch_siz
     Returns: training_dataloaders, testing_datasets, test_loader
 
     """
-    training_dataloaders = [
-        get_dataloader(x, y, batch_size=batch_size) for x, y in zip(x_training_list, y_training_list)]
+    if x_training_list is None or y_training_list is None:
+        training_dataloaders = None
+    else:
+        training_dataloaders = [
+            get_dataloader(x, y, batch_size=batch_size) for x, y in zip(x_training_list, y_training_list)]
     testing_datasets = get_datasets_by_label(x_test, y_test)
     test_loader = get_dataloader(x_test, (y_test == 0), batch_size=batch_size)
     return training_dataloaders, testing_datasets, test_loader

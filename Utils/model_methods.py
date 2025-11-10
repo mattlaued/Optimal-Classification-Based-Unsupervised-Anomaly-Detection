@@ -9,31 +9,39 @@ def bump_activation(x, sigma=0.5):
 
 
 class Bump(nn.Module):
-    def __init__(self, sigma=0.5, trainable=False):
+    def __init__(self, sigma=0.5, trainable=False, quadratic=False, device="cuda"):
         super(Bump, self).__init__()
         self.sigma = sigma
         self.sigma_factor = nn.Parameter(
-            torch.tensor(self.sigma, dtype=torch.float32), requires_grad=trainable)
+            torch.tensor(self.sigma, dtype=torch.float64), requires_grad=trainable).to(device)
+        self.quadratic = quadratic
 
     def forward(self, inputs):
+        if self.quadratic == "abs":
+            return -torch.abs(inputs / self.sigma_factor)
+        elif self.quadratic:
+            return -torch.square(inputs) / torch.square(self.sigma_factor)
         return bump_activation(inputs, self.sigma_factor)
 
 
 class RBFLayer(nn.Module):
-    def __init__(self, units, beta=1., initializer=nn.init.xavier_normal_, dim=1, seed=2023):
+    def __init__(self, units, beta=1., initializer=nn.init.xavier_normal_, dim=1, mu=None, seed=2023):
         super(RBFLayer, self).__init__()
         self.units = units
         self.beta = torch.tensor(beta, dtype=torch.float32)
         self.dim = dim
-        if initializer is None:
-            mu = torch.ones(units)
-        else:
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed(seed)
-            if dim == 1:
-                mu = initializer((units,))
+        if mu is None:
+            if initializer is None:
+                mu = torch.ones(units)
             else:
-                mu = initializer(units)
+                torch.manual_seed(seed)
+                torch.cuda.manual_seed(seed)
+
+                mu = initializer(torch.empty(units)).squeeze()
+                # if dim == 1:
+                #     mu = initializer(torch.empty(units))
+                # else:
+                #     mu = initializer(units)
         # if dim == 1:
         self.mu = nn.Parameter(mu, requires_grad=True)
         # else:
@@ -41,9 +49,12 @@ class RBFLayer(nn.Module):
 
     def forward(self, inputs):
         if self.dim == 1:
-            inputs_expanded = torch.unsqueeze(inputs, 1)
-            diff = inputs_expanded - self.mu
-            l2 = torch.sum(torch.pow(diff, 2), dim=2)
+            inputs = torch.unsqueeze(inputs, -1)
+            mu = self.mu
+            while mu.dim() <= 1:
+                mu = torch.unsqueeze(mu, -1)
+            diff = inputs - mu
+            l2 = torch.sum(torch.pow(diff, 2), dim=1)
         # elif self.dim == 2:
         else:
             x = inputs[:, :, None]
@@ -102,7 +113,7 @@ class PL_Model(L.LightningModule):
         ################################################
 
         L.seed_everything(seed, workers=True)
-        self.classifier = classifier
+        self.classifier = classifier.to(device)
         self.optimizer = optimizer
         self.optimizer_params = optimizer_params
         self.lr_scheduler = lr_scheduler
@@ -168,6 +179,10 @@ class PL_Model(L.LightningModule):
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
 
+        # add it here in case we need to do adversarial training later on
+        if adv_training and model is not None:
+            x = self.attack(model, x, y, epsilon=0.03, alpha=0.01, num_iter=40, random_start=True,
+                                device=self.device)
         y_pred = self.forward(x)
         loss = self.get_loss(y_pred, y)
         # if self.neg_labels:
@@ -245,7 +260,8 @@ class DeepSVDD(L.LightningModule):
         ################################################
 
         L.seed_everything(seed, workers=True)
-        centre.requires_grad = True
+        if centre is not None:
+            centre.requires_grad = True
         self.centre = centre
         self.optimizer = optimizer
         self.optimizer_params = optimizer_params
@@ -265,9 +281,19 @@ class DeepSVDD(L.LightningModule):
         # print(neg_dist.size())
         return neg_dist
 
-    def get_loss(self, y_pred):
-        loss = self.loss_fn(y_pred, torch.zeros_like(y_pred))
-        return loss
+    def get_loss(self, y_pred, y_true):
+        """
+
+        Args:
+            y_pred:
+            y_true: 0 for anom, 1 for normal
+
+        Returns:
+
+        """
+        exponent = 2 * y_true - 1.      # -1 for anom, +1 for normal
+        loss = (self.loss_fn(y_pred, torch.zeros_like(y_pred))) ** exponent
+        return loss.mean()
 
     def training_step(self, batch, batch_idx, adv_training=False, model=None):
         x, y = batch
@@ -278,7 +304,7 @@ class DeepSVDD(L.LightningModule):
             x = self.attack(model, x, y, epsilon=0.03, alpha=0.01, num_iter=40, random_start=True,
                                 device=self.device)
         y_pred = self.forward(x)
-        loss = self.get_loss(y_pred)
+        loss = self.get_loss(y_pred, y)
         # Logging to TensorBoard (if installed) by default
         self.log("train_loss", loss, prog_bar=True)
         return loss
@@ -287,7 +313,7 @@ class DeepSVDD(L.LightningModule):
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
         y_pred = self.forward(x)
-        loss = self.get_loss(y_pred)
+        loss = self.get_loss(y_pred, y)
         #         loss = self.get_loss(batch, batch_idx)
         self.log("val_loss", loss, prog_bar=True)
         return loss
@@ -302,7 +328,7 @@ class DeepSVDD(L.LightningModule):
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
         y_pred = self.forward(x)
-        loss = self.get_loss(y_pred)
+        loss = self.get_loss(y_pred, y)
         self.log("test_loss", loss, prog_bar=True)
 
     def configure_optimizers(self):
@@ -315,7 +341,7 @@ class DeepSVDD(L.LightningModule):
 
 
 def build_classifier(classifier_layers, rep_dim, activation=nn.LeakyReLU(), one_class=True, dropout=0,
-                     sigmoid_head=True, seed=42):
+                     sigmoid_head=True, quadratic_bump=False, seed=42):
     if seed is not None:
         L.seed_everything(seed, workers=True)
     classifier_head = nn.ModuleList()
@@ -327,29 +353,37 @@ def build_classifier(classifier_layers, rep_dim, activation=nn.LeakyReLU(), one_
                 classifier_head.append(nn.Dropout(p=dropout))
         classifier_head.append(nn.Linear(rep_dim, rep_dim))
     else:
-        for i in range(len(rep_dim)-2):
-            classifier_head.append(nn.Linear(rep_dim[i], rep_dim[i+1]))
-            classifier_head.append(activation)
-            if dropout > 0:
-                classifier_head.append(nn.Dropout(p=dropout))
-        classifier_head.append(nn.Linear(rep_dim[-2], rep_dim[-1]))
+        if len(rep_dim) >= 2:
+            for i in range(len(rep_dim)-2):
+                classifier_head.append(nn.Linear(rep_dim[i], rep_dim[i+1]))
+                classifier_head.append(activation)
+                if dropout > 0:
+                    classifier_head.append(nn.Dropout(p=dropout))
+            classifier_head.append(nn.Linear(rep_dim[-2], rep_dim[-1]))
         rep_dim = rep_dim[-1]
 
     if one_class:
-        classifier_head.append(Bump(sigma=0.5))
-        classifier_head.append(RBFLayer(units=1, initializer=None))
+        classifier_head.append(Bump(sigma=0.5, quadratic=quadratic_bump))
+        if quadratic_bump:
+            mu = torch.zeros(1)
+        else:
+            mu = torch.ones(1)
+        classifier_head.append(RBFLayer(units=1, initializer=None, mu=mu))
     else:
         classifier_head.append(activation)
         classifier_head.append(nn.Linear(rep_dim, 1))
         if sigmoid_head:
-            classifier_head.append(nn.Sigmoid())
+            if type(sigmoid_head) is bool:
+                classifier_head.append(nn.Sigmoid())
+            else:
+                classifier_head.append(sigmoid_head)
 
     classifier = nn.Sequential(*classifier_head)
 
     return classifier
 
 
-def build_model(rep_dim, activation=nn.LeakyReLU(), bias=False, batchnorm=True, dropout=0, seed=42):
+def build_model(rep_dim, activation=nn.LeakyReLU(), bias=False, batchnorm=True, dropout=0, seed=42, bias_last=None):
     if seed is not None:
         L.seed_everything(seed, workers=True)
     model = nn.ModuleList()
@@ -360,7 +394,9 @@ def build_model(rep_dim, activation=nn.LeakyReLU(), bias=False, batchnorm=True, 
             model.append(nn.BatchNorm1d(rep_dim[i+1], affine=False, eps=1e-10))
         if dropout > 0:
             model.append(nn.Dropout(p=dropout))
-    model.append(nn.Linear(rep_dim[-2], rep_dim[-1], bias=bias))
+    if bias_last is None:
+        bias_last = bias
+    model.append(nn.Linear(rep_dim[-2], rep_dim[-1], bias=bias_last))
     return nn.Sequential(*model)
 
 
